@@ -1,3 +1,6 @@
+import logging
+import re
+import yaml
 import datetime
 import os.path
 
@@ -5,118 +8,178 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
-
-from abc import ABC, abstractmethod
 
 # If modifying these scopes, delete the file token.json.
 SCOPES = ['https://www.googleapis.com/auth/calendar.readonly']
 
-# Ühe eventi puhul:
-#   Kui pole kellaaegasid, igno
-#   Kui pole lõppkellaaega, igno (või allokeeri mingi tund vms??)
-#   Jaluta läbi filtrid, esimene, mis matchib, läheb käiku. Spetsiifilisemad asjad peaks siis enne olema.
-#       Nt kõigepealt, et kas on mingi ainekood sees, muu sõne pealkirjas (üldistatav veidi)
-#       Siis, et mis kalendrisse kuulub, map kalendri ID ja toggl project ID vahel.
+from toggl import api
+from toggl.utils import Config
+
+class TogglInterface:
+  def __init__(self, token_filename="toggl_token.txt") -> None:
+    token = ""
+    with open(token_filename) as f:
+        token = f.read().strip()
+
+    self.config = Config.factory()  # Without None it will load the default config file
+    self.config.api_token = token
+    self.config.timezone = 'utc'  # Custom timezone
+
+  def add_entry(self, description=None, start_time=None, stop_time=None, project_id=None):
+    entry = api.TimeEntry(start_time, stop_time, description=description, project=project_id)
+    entry.save()
+
+  def start_tracking(self, description, project_id=None, client=None):
+    api.TimeEntry.start_and_save(
+        config=self.config,
+        description=description,
+        project=project_id
+    )
+
+  def stop_tracking(self):
+    current = api.TimeEntry.objects.current(config=self.config)
+    if current is not None:
+      current.stop_and_save()
 
 
-class Filter(ABC):
-    """ A toggl-specific filter. Converts specific events into time entries."""
-    @abstractmethod
-    def match(self, event) -> bool:
-        return
+class GcalInterface():
 
-    @abstractmethod
-    def upload(self, event) -> bool:
-        return
-
-
-class ProjectFilter(Filter):
-    def __init__(self, project_dict) -> None:
-        super().__init__()
-        self.project_dict = project_dict
+    def __init__(self, credentials_path="credentials.json", token_path="token.json", blacklist=[]) -> None:
+        # Get google calendar token
+        creds = self.get_creds(token_path=token_path, credentials_path=credentials_path)
+        self.service = build('calendar', 'v3', credentials=creds)
+        self.blacklist=blacklist
+        self.calendars = self.get_calendars()
 
 
-    def match(self, event) -> bool:
-        if self.project_dict[event["calendar"]["id"]] is not None:
-            return True
+    def get_creds(self, token_path="token.json", credentials_path="credentials.json"):
+        creds = None
+        # The file token.json stores the user's access and refresh tokens, and is
+        # created automatically when the authorization flow completes for the first
+        # time.
+        if os.path.exists(token_path):
+            creds = Credentials.from_authorized_user_file(token_path, SCOPES)
+        # If there are no (valid) credentials available, let the user log in.
+        if not creds or not creds.valid:
+            if creds and creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+            else:
+                flow = InstalledAppFlow.from_client_secrets_file(
+                    credentials_path, SCOPES)
+                creds = flow.run_local_server(port=0)
+            # Save the credentials for the next run
+            with open(token_path, 'w') as token:
+                token.write(creds.to_json())
+        return creds
 
-    def upload(self, event) -> bool:
+
+    def get_calendars(self):
+        calendars = []
+        page_token = None
+        while True:
+            calendar_list = self.service.calendarList().list(pageToken=page_token).execute()
+            for calendar_list_entry in calendar_list['items']:
+                logging.debug(calendar_list_entry["id"])
+                if calendar_list_entry["id"] not in self.blacklist:
+                    calendars.append(calendar_list_entry)
+            page_token = calendar_list.get('nextPageToken')
+            if not page_token:
+                break
+        return calendars
+
+
+    def get_events(self, start_time, end_time):
+        event_list = []
+        for calendar in self.calendars:
+            events_result = self.service.events().list(calendarId=calendar["id"], timeMin=start_time, timeMax=end_time,
+                                                    singleEvents=True,
+                                                    orderBy='startTime').execute()
+            events = events_result.get('items', [])
+            for event in events:
+                event["calendar"] = calendar["id"]
+                event_list.append(event)
+        return event_list
+
+
+class GcalTogglUploader():
+
+    def __init__(self, config_path=os.path.dirname(__file__)+"/config.yaml",
+                        gcal_credentials_path="credentials.json",
+                        gcal_token_path="token.json",
+                        toggl_token_path="toggl_token.txt") -> None:
+        with open(config_path, "r") as stream:
+            try:
+                config = yaml.safe_load(stream) # Throws yaml parse error
+            except yaml.YAMLError as e:
+                logging.exception(e)
+                logging.error("Broken config file. Exiting.")
+                exit(1)
+
+        # Get user configurations
+        self.summary_blacklist = config["summary_blacklist"]
+        self.summary_project_dict = config["summary_project_map"]
+        calendar_blacklist = config["calendar_blacklist"]
+        self.calendar_project_map = config["calendar_project_map"]
+
+        self.gcal = GcalInterface(credentials_path=gcal_credentials_path,token_path=gcal_token_path, blacklist=calendar_blacklist)
+        self.toggl = TogglInterface(toggl_token_path)
+
+
+    def is_blacklisted(self, event):
+        for regexp in self.summary_blacklist:
+            if re.search(regexp, event["summary"]) is not None: # If event matches blacklist, skip it.
+                return True
         return False
 
 
-class SortingHat:
-    def __init__(self) -> None:
-        self.filters = []
+    def update(self, start_time, end_time):
+        """ Go through all events in the specified time frame and create events for them."""
 
+        for event in self.gcal.get_events(start_time=start_time, end_time=end_time):
+            logging.debug(event)
 
-    def sort_event(self, event):
-        for filter in self.filters:
-            if filter.match(event):
-                filter.upload(event)
-                break
+            if event["start"].get("dateTime") is None or event["end"].get("dateTime") is None:
+                logging.debug(f"event has no end/start, skipping")
+                continue
 
+            if self.is_blacklisted(event):
+                logging.debug(f"event is blacklisted, skipping")
+                continue
+            summary = event["summary"]
+            logging.info(f"Adding event {summary}")
 
-def get_creds():
-    creds = None
-    # The file token.json stores the user's access and refresh tokens, and is
-    # created automatically when the authorization flow completes for the first
-    # time.
-    if os.path.exists('token.json'):
-        creds = Credentials.from_authorized_user_file('token.json', SCOPES)
-    # If there are no (valid) credentials available, let the user log in.
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            flow = InstalledAppFlow.from_client_secrets_file(
-                'credentials.json', SCOPES)
-            creds = flow.run_local_server(port=0)
-        # Save the credentials for the next run
-        with open('token.json', 'w') as token:
-            token.write(creds.to_json())
-    return creds
+            data = {}
+            data["description"] = event["summary"]
 
+            for regexp in self.summary_project_dict:
+                if re.search(regexp, event["summary"]) is not None: # If summary matches an expression, use the mapped project
+                    data["project_id"] = self.summary_project_dict[regexp]
+            if data.get("project_id") is None:
+                data["project_id"] = self.calendar_project_map.get(event["calendar"])
 
-def get_calendars(service, blacklist=[]):
-    calendars = []
-    page_token = None
-    while True:
-        calendar_list = service.calendarList().list(pageToken=page_token).execute()
-        for calendar_list_entry in calendar_list['items']:
-            print(calendar_list_entry["id"])
-            if calendar_list_entry["id"] not in blacklist:
-                calendars.append(calendar_list_entry)
-        page_token = calendar_list.get('nextPageToken')
-        if not page_token:
-            break
-    return calendars
+            data["start_time"] = event["start"]["dateTime"]
+            data["stop_time"] = event["end"]["dateTime"]
+
+            logging.debug(data)
+
+            self.toggl.add_entry(**data)
 
 
 def main():
-    blacklist = ["13lt9o68crpjggp36kv84qbn40@group.calendar.google.com"]
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        handlers=[
+            logging.FileHandler("gcal_toggl.log", mode="w"),
+            logging.StreamHandler()
+        ])
+    uploader = GcalTogglUploader()
 
-    creds = get_creds()
-    service = build('calendar', 'v3', credentials=creds)
-    calendars = get_calendars(service, blacklist=blacklist)
+    # Time range to look at events
+    start_time = (datetime.datetime.utcnow() - datetime.timedelta(days=1)).isoformat() + 'Z'
+    end_time = datetime.datetime.utcnow().isoformat() + 'Z'  # 'Z' indicates UTC time
 
-    now = datetime.datetime.utcnow().isoformat() + 'Z'  # 'Z' indicates UTC time
-    yesterday = datetime.datetime.utcnow() - datetime.timedelta(days=7)
-    yesterday = yesterday.isoformat() + 'Z'
-
-    print('Get all events in the past 24 hours')
-    for calendar in calendars:
-        events_result = service.events().list(calendarId=calendar["id"], timeMin=yesterday, timeMax=now,
-                                                singleEvents=True,
-                                                orderBy='startTime').execute()
-        events = events_result.get('items', [])
-
-        # Prints the start and name of the next 10 events
-        for event in events:
-            event["calendar"] = calendar
-            start = event['start'].get('dateTime', event['start'].get('date'))
-            print(event)
-            print(start, event['summary'])
+    uploader.update(start_time=start_time, end_time=end_time)
 
 
 if __name__ == '__main__':
