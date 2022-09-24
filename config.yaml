@@ -1,0 +1,12 @@
+
+summary_project_map: # Use this project, if summary matches expression
+    "EXPRESSION_HERE": "PROJECT_ID_HERE"
+
+summary_blacklist: # Ignore events, if summary matches any of these expressions
+    - "BLACKLISTED_EXPRESSION_HERE"
+
+calendar_project_map: # Map calendars to toggl projects
+    "CALENDAR_ID_HERE": "PROJECT_ID_HERE"
+
+calendar_blacklist: # No events are taken from blacklisted calendars
+    - "BLACKLISTED_CALENDAR_ID_HERE"
