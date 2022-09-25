@@ -148,10 +148,16 @@ def main():
     uploader = GcalTogglUploader()
 
     # Time range to look at events
-    start_time = (datetime.datetime.utcnow() - datetime.timedelta(days=1)).isoformat() + 'Z'
+    if os.path.exists("previous_time.txt"):
+        with open("previous_time.txt") as f:
+            start_time = f.read().strip()
+    else:
+        start_time = (datetime.datetime.utcnow() - datetime.timedelta(days=1)).isoformat() + 'Z'
     end_time = datetime.datetime.utcnow().isoformat() + 'Z'  # 'Z' indicates UTC time
 
     uploader.update(start_time=start_time, end_time=end_time)
+    with open("previous_time.txt", "w") as f:
+        f.write(start_time)
 
 
 if __name__ == '__main__':

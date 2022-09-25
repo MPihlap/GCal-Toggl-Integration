@@ -1,6 +1,8 @@
 # Google Authorization
+*token.txt
 *token.json
 *credentials.json
+*previous_time.txt
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
