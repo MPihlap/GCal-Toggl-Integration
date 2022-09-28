@@ -157,7 +157,7 @@ def main():
 
     uploader.update(start_time=start_time, end_time=end_time)
     with open("previous_time.txt", "w") as f:
-        f.write(start_time)
+        f.write(end_time)
 
 
 if __name__ == '__main__':
