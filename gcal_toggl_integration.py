@@ -110,8 +110,13 @@ class GcalTogglUploader():
         for event in self.gcal.get_events(start_time=start_time, end_time=end_time):
             logging.debug(event)
 
-            if event["start"].get("dateTime") is None or event["end"].get("dateTime") is None:
+            event_start = event["start"].get("dateTime")
+            event_end = event["end"].get("dateTime")
+            if event_start is None or event_end is None:
                 logging.debug(f"event has no end/start, skipping")
+                continue
+            if datetime.datetime.fromisoformat(event_start[:-1]) <= datetime.datetime.fromisoformat(end_time[:-1]) <= datetime.datetime.fromisoformat(event_end[:-1]):
+                logging.debug(f"event is currently running, skipping")
                 continue
 
             if self.is_blacklisted(event):
