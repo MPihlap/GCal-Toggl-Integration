@@ -109,13 +109,17 @@ class GcalTogglUploader():
 
         for event in self.gcal.get_events(start_time=start_time, end_time=end_time):
             logging.debug(event)
-
             event_start = event["start"].get("dateTime")
             event_end = event["end"].get("dateTime")
+            event_start = event_start.split("+")[0] if "Z" not in event_start else event["start"].get("dateTime")[:-1]
+            event_end = event_end.split("+")[0]  if "Z" not in event_end else event["end"].get("dateTime")[:-1]
             if event_start is None or event_end is None:
                 logging.debug(f"event has no end/start, skipping")
                 continue
-            if datetime.datetime.fromisoformat(event_start[:-1]) <= datetime.datetime.fromisoformat(end_time[:-1]) <= datetime.datetime.fromisoformat(event_end[:-1]):
+
+            event_start = datetime.datetime.fromisoformat(event_start)#.replace(tzinfo=None)
+            event_end = datetime.datetime.fromisoformat(event_end)#.replace(tzinfo=None)
+            if event_start <= datetime.datetime.fromisoformat(end_time[:-1]) <= event_end:
                 logging.debug(f"event is currently running, skipping")
                 continue
 
@@ -144,7 +148,7 @@ class GcalTogglUploader():
 
 def main():
     logging.basicConfig(
-        level=logging.INFO,
+        level=logging.DEBUG,
         format="%(asctime)s [%(levelname)s] %(message)s",
         handlers=[
             logging.FileHandler("gcal_toggl.log", mode="w"),
