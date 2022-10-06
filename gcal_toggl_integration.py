@@ -106,16 +106,17 @@ class GcalTogglUploader():
 
     def update(self, start_time, end_time):
         """ Go through all events in the specified time frame and create events for them."""
-
-        for event in self.gcal.get_events(start_time=start_time, end_time=end_time):
+        events = self.gcal.get_events(start_time=start_time, end_time=end_time)
+        logging.debug(f"{events}\n")
+        for event in events:
             logging.debug(event)
             event_start = event["start"].get("dateTime")
             event_end = event["end"].get("dateTime")
-            event_start = event_start.split("+")[0] if "Z" not in event_start else event["start"].get("dateTime")[:-1]
-            event_end = event_end.split("+")[0]  if "Z" not in event_end else event["end"].get("dateTime")[:-1]
             if event_start is None or event_end is None:
                 logging.debug(f"event has no end/start, skipping")
                 continue
+            event_start = event_start.split("+")[0] if "Z" not in event_start else event["start"].get("dateTime")[:-1]
+            event_end = event_end.split("+")[0]  if "Z" not in event_end else event["end"].get("dateTime")[:-1]
 
             event_start = datetime.datetime.fromisoformat(event_start)#.replace(tzinfo=None)
             event_end = datetime.datetime.fromisoformat(event_end)#.replace(tzinfo=None)
@@ -148,7 +149,7 @@ class GcalTogglUploader():
 
 def main():
     logging.basicConfig(
-        level=logging.DEBUG,
+        level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(message)s",
         handlers=[
             logging.FileHandler("gcal_toggl.log", mode="w"),
